@@ -9,6 +9,7 @@ import redis.asyncio as aioredis
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from qdrant_client import QdrantClient
 
+from dedup import Deduplicator
 from nhl_client import NHLClient
 from news_client import NewsClient
 from reddit_client import RedditClient
@@ -32,49 +33,50 @@ def check_connections():
     log.info("Qdrant: reachable")
 
 
-async def publish(r: aioredis.Redis, source: str, payload: dict):
-    """Publish a document to the Redis ingest stream."""
+async def publish(r: aioredis.Redis, dedup: Deduplicator, source: str, payload: dict) -> bool:
+    """Publish a document to the Redis ingest stream, skipping duplicates.
+    Returns True if published, False if dropped as duplicate."""
+    if await dedup.check_and_mark(source, payload):
+        return False
     msg_id = await r.xadd(STREAM_KEY, {
         "source": source,
         "payload": json.dumps(payload, default=str),
         "ts": str(time.time()),
     })
     log.debug(f"stream {STREAM_KEY} [{source}] → {msg_id}")
+    return True
 
 
 # ── Poll jobs ─────────────────────────────────────────────────────────────────
 
-async def poll_scores(nhl: NHLClient, r: aioredis.Redis):
+async def poll_scores(nhl: NHLClient, r: aioredis.Redis, dedup: Deduplicator):
     try:
         scores = await nhl.fetch_scores()
-        for game in scores.games:
-            await publish(r, "nhl_scores", game.model_dump())
-        log.info(f"scores: published {len(scores.games)} game(s)")
+        n = sum([await publish(r, dedup, "nhl_scores", g.model_dump()) for g in scores.games])
+        log.info(f"scores: {n} new, {len(scores.games) - n} duplicate(s) dropped")
     except Exception as e:
         log.warning(f"poll_scores failed: {e}")
 
 
-async def poll_standings(nhl: NHLClient, r: aioredis.Redis):
+async def poll_standings(nhl: NHLClient, r: aioredis.Redis, dedup: Deduplicator):
     try:
         standings = await nhl.fetch_standings()
-        for team in standings.standings:
-            await publish(r, "nhl_standings", team.model_dump())
-        log.info(f"standings: published {len(standings.standings)} team(s)")
+        n = sum([await publish(r, dedup, "nhl_standings", t.model_dump()) for t in standings.standings])
+        log.info(f"standings: {n} new, {len(standings.standings) - n} duplicate(s) dropped")
     except Exception as e:
         log.warning(f"poll_standings failed: {e}")
 
 
-async def poll_player_stats(nhl: NHLClient, r: aioredis.Redis):
+async def poll_player_stats(nhl: NHLClient, r: aioredis.Redis, dedup: Deduplicator):
     try:
         stats = await nhl.fetch_player_stats()
-        for player in stats.data:
-            await publish(r, "nhl_player_stats", player.model_dump())
-        log.info(f"player_stats: published {len(stats.data)} skater(s)")
+        n = sum([await publish(r, dedup, "nhl_player_stats", p.model_dump()) for p in stats.data])
+        log.info(f"player_stats: {n} new, {len(stats.data) - n} duplicate(s) dropped")
     except Exception as e:
         log.warning(f"poll_player_stats failed: {e}")
 
 
-async def poll_play_by_play(nhl: NHLClient, r: aioredis.Redis):
+async def poll_play_by_play(nhl: NHLClient, r: aioredis.Redis, dedup: Deduplicator):
     try:
         game_ids = await nhl.fetch_live_game_ids()
         if not game_ids:
@@ -82,32 +84,30 @@ async def poll_play_by_play(nhl: NHLClient, r: aioredis.Redis):
             return
         for game_id in game_ids:
             pbp = await nhl.fetch_play_by_play(game_id)
-            for event in pbp.plays:
-                await publish(r, "nhl_play_by_play", {"game_id": game_id, **event.model_dump()})
-            log.info(f"play_by_play: published {len(pbp.plays)} event(s) for game {game_id}")
+            n = sum([await publish(r, dedup, "nhl_play_by_play", {"game_id": game_id, **e.model_dump()}) for e in pbp.plays])
+            log.info(f"play_by_play: {n} new, {len(pbp.plays) - n} duplicate(s) dropped for game {game_id}")
     except Exception as e:
         log.warning(f"poll_play_by_play failed: {e}")
 
 
-async def poll_reddit(reddit: RedditClient, r: aioredis.Redis):
+async def poll_reddit(reddit: RedditClient, r: aioredis.Redis, dedup: Deduplicator):
     try:
         pages = await reddit.fetch_all_subreddits()
-        total = 0
+        total_new, total_all = 0, 0
         for page in pages:
-            for post in page.posts:
-                await publish(r, f"reddit_{page.subreddit}", post.model_dump())
-            total += len(page.posts)
-        log.info(f"reddit: published {total} post(s)")
+            n = sum([await publish(r, dedup, f"reddit_{page.subreddit}", p.model_dump()) for p in page.posts])
+            total_new += n
+            total_all += len(page.posts)
+        log.info(f"reddit: {total_new} new, {total_all - total_new} duplicate(s) dropped")
     except Exception as e:
         log.warning(f"poll_reddit failed: {e}")
 
 
-async def poll_news(news: NewsClient, r: aioredis.Redis):
+async def poll_news(news: NewsClient, r: aioredis.Redis, dedup: Deduplicator):
     try:
         result = await news.fetch_hockey_news()
-        for article in result.articles:
-            await publish(r, "news", article.model_dump())
-        log.info(f"news: published {len(result.articles)} article(s)")
+        n = sum([await publish(r, dedup, "news", a.model_dump()) for a in result.articles])
+        log.info(f"news: {n} new, {len(result.articles) - n} duplicate(s) dropped")
     except RuntimeError as e:
         log.warning(f"poll_news skipped: {e}")
     except Exception as e:
@@ -134,14 +134,15 @@ async def main():
     reddit = RedditClient()
     news = NewsClient(redis_url=REDIS_URL)
     stream = aioredis.from_url(REDIS_URL, decode_responses=True)
+    dedup = Deduplicator(stream)
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(poll_scores, "interval", seconds=300, args=[nhl, stream])
-    scheduler.add_job(poll_standings, "interval", seconds=300, args=[nhl, stream])
-    scheduler.add_job(poll_player_stats, "interval", seconds=300, args=[nhl, stream])
-    scheduler.add_job(poll_play_by_play, "interval", seconds=300, args=[nhl, stream])
-    scheduler.add_job(poll_reddit, "interval", seconds=900, args=[reddit, stream])
-    scheduler.add_job(poll_news, "interval", seconds=3600, args=[news, stream])
+    scheduler.add_job(poll_scores, "interval", seconds=300, args=[nhl, stream, dedup])
+    scheduler.add_job(poll_standings, "interval", seconds=300, args=[nhl, stream, dedup])
+    scheduler.add_job(poll_player_stats, "interval", seconds=300, args=[nhl, stream, dedup])
+    scheduler.add_job(poll_play_by_play, "interval", seconds=300, args=[nhl, stream, dedup])
+    scheduler.add_job(poll_reddit, "interval", seconds=900, args=[reddit, stream, dedup])
+    scheduler.add_job(poll_news, "interval", seconds=3600, args=[news, stream, dedup])
 
     scheduler.start()
     log.info("Scheduler started — NHL:5min  Reddit:15min  News:60min")
