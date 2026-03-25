@@ -10,9 +10,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from qdrant_client import QdrantClient
 
 from dedup import Deduplicator
-from nhl_client import NHLClient
-from news_client import NewsClient
-from reddit_client import RedditClient
+from clients.nhl_client import NHLClient
+from clients.news_client import NewsClient
+from clients.reddit_client import RedditClient
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ async def publish(r: aioredis.Redis, dedup: Deduplicator, source: str, payload: 
     return True
 
 
-# ── Poll jobs ─────────────────────────────────────────────────────────────────
+# Poll jobs
 
 async def poll_scores(nhl: NHLClient, r: aioredis.Redis, dedup: Deduplicator):
     try:
@@ -114,7 +114,7 @@ async def poll_news(news: NewsClient, r: aioredis.Redis, dedup: Deduplicator):
         log.warning(f"poll_news failed: {e}")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# Main
 
 async def main():
     log.info("Ingestion worker starting...")
