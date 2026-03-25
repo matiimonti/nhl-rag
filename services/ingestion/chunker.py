@@ -38,7 +38,9 @@ NHL_TEAM_ABBREVS: dict[str, str] = {
 
 _TEAM_FULL_NAMES = set(NHL_TEAM_ABBREVS.values())
 _TEAM_ABBREV_RE = re.compile(r'\b(' + '|'.join(NHL_TEAM_ABBREVS.keys()) + r')\b')
-_PLAYER_NAME_RE = re.compile(r'\b([A-Z][a-z]+ [A-Z][a-z]+)\b')
+_PLAYER_NAME_RE = re.compile(
+    r'\b([A-Z](?:[a-z]+|[A-Z][a-z]+)+ [A-Z](?:[a-z]+|[A-Z][a-z]+)+)\b'
+)
 
 
 # Data classes
@@ -72,8 +74,14 @@ def extract_teams(text: str) -> list[str]:
 
 def extract_players(text: str) -> list[str]:
     candidates = _PLAYER_NAME_RE.findall(text)
-    # filter out team full names accidentally matched
-    return [p for p in candidates if p not in _TEAM_FULL_NAMES]
+    # filter out team full names accidentally matched, deduplicate preserving order
+    seen: set[str] = set()
+    result = []
+    for p in candidates:
+        if p not in _TEAM_FULL_NAMES and p not in seen:
+            seen.add(p)
+            result.append(p)
+    return result
 
 
 # Document -> text formatters
@@ -150,6 +158,10 @@ _FORMATTERS = {
 
 class Chunker:
     def __init__(self, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
+        if overlap >= chunk_size:
+            raise ValueError(
+                f"overlap ({overlap}) must be less than chunk_size ({chunk_size})"
+            )
         self.chunk_size = chunk_size
         self.overlap = overlap
 
