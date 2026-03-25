@@ -9,7 +9,10 @@ import redis.asyncio as aioredis
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from qdrant_client import QdrantClient
 
+from chunker import Chunker
 from dedup import Deduplicator
+from embedder import Embedder
+from qdrant_store import ensure_collection, upsert_chunks
 from clients.nhl_client import NHLClient
 from clients.news_client import NewsClient
 from clients.reddit_client import RedditClient
@@ -21,6 +24,10 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 STREAM_KEY = "nhl:ingest"
+CONSUMER_GROUP = "embed-workers"
+CONSUMER_NAME = "worker-1"
+STREAM_BATCH = 10  # messages per read
+THROUGHPUT_LOG_N = 50  # log throughput every N docs
 
 
 def check_connections():
@@ -114,6 +121,97 @@ async def poll_news(news: NewsClient, r: aioredis.Redis, dedup: Deduplicator):
         log.warning(f"poll_news failed: {e}")
 
 
+# Stream consumer
+
+async def _with_backoff(fn, *args, max_retries: int = 3, base_delay: float = 1.0):
+    """Run a sync function in a thread with exponential backoff on failure."""
+    for attempt in range(max_retries):
+        try:
+            return await asyncio.to_thread(fn, *args)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            log.warning(f"Retry {attempt + 1}/{max_retries} in {delay:.0f}s: {e}")
+            await asyncio.sleep(delay)
+
+
+async def _process_message(
+    fields: dict,
+    chunker: Chunker,
+    embedder: Embedder,
+    qdrant: QdrantClient,
+):
+    """Chunk → embed → upsert one stream message."""
+    from datetime import date as _date
+    source = fields.get("source", "")
+    payload = json.loads(fields.get("payload", "{}"))
+    today = _date.today().isoformat()
+
+    chunks = await asyncio.to_thread(chunker.chunk_document, source, payload, today)
+    if not chunks:
+        return 0
+
+    embedded = await _with_backoff(embedder.embed_chunks, chunks)
+    n = await _with_backoff(upsert_chunks, qdrant, embedded)
+    return n
+
+
+async def consume_stream(
+    stream: aioredis.Redis,
+    chunker: Chunker,
+    embedder: Embedder,
+    qdrant: QdrantClient,
+):
+    """
+    Read from nhl:ingest, chunk, embed, and upsert to Qdrant.
+    Uses a consumer group for at-least-once delivery.
+    XACKs only after a successful upsert.
+    """
+    try:
+        await stream.xgroup_create(STREAM_KEY, CONSUMER_GROUP, id="0", mkstream=True)
+        log.info(f"Consumer group '{CONSUMER_GROUP}' created")
+    except Exception:
+        log.info(f"Consumer group '{CONSUMER_GROUP}' already exists")
+
+    total_docs = 0
+    total_chunks = 0
+    t_start = time.perf_counter()
+
+    while True:
+        try:
+            response = await stream.xreadgroup(
+                CONSUMER_GROUP, CONSUMER_NAME,
+                {STREAM_KEY: ">"},
+                count=STREAM_BATCH,
+                block=2000,
+            )
+            if not response:
+                continue
+
+            for _stream_name, entries in response:
+                for msg_id, fields in entries:
+                    try:
+                        n = await _process_message(fields, chunker, embedder, qdrant)
+                        await stream.xack(STREAM_KEY, CONSUMER_GROUP, msg_id)
+                        total_docs += 1
+                        total_chunks += n
+                    except Exception as e:
+                        log.warning(f"Failed to process message {msg_id}: {e}")
+
+            if total_docs > 0 and total_docs % THROUGHPUT_LOG_N == 0:
+                elapsed = time.perf_counter() - t_start
+                log.info(
+                    f"Throughput: {total_docs / elapsed:.1f} docs/s | "
+                    f"{total_chunks / elapsed:.1f} chunks/s | "
+                    f"{total_docs} docs, {total_chunks} chunks total"
+                )
+
+        except Exception as e:
+            log.warning(f"Consumer loop error: {e}")
+            await asyncio.sleep(2)
+
+
 # Main
 
 async def main():
@@ -129,6 +227,13 @@ async def main():
     else:
         log.error("Could not reach Redis or Qdrant after 5 attempts — exiting")
         raise SystemExit(1)
+
+    qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    ensure_collection(qdrant)
+
+    log.info("Loading embedding model (may take a moment on first run)...")
+    embedder = await asyncio.to_thread(Embedder)
+    chunker = Chunker()
 
     nhl = NHLClient()
     reddit = RedditClient()
@@ -146,6 +251,9 @@ async def main():
 
     scheduler.start()
     log.info("Scheduler started — NHL:5min  Reddit:15min  News:60min")
+
+    asyncio.create_task(consume_stream(stream, chunker, embedder, qdrant))
+    log.info("Stream consumer started")
 
     try:
         await asyncio.Event().wait()

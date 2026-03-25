@@ -1,9 +1,9 @@
 """
 Embedding model setup for the NHL RAG pipeline.
 
-Model:      BAAI/bge-large-en-v1.5
+Model: BAAI/bge-large-en-v1.5
 Dimensions: 1024
-Device:     CPU (batch_size=16)
+Device: CPU (batch_size=16)
 
 BGE models expect a prefix when embedding passages for indexing:
   "Represent this sentence: "
