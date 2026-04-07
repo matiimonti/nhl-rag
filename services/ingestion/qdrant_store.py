@@ -12,7 +12,7 @@ Payload schema per point:
   date (str)  — ISO date of ingestion (e.g. "2026-03-25")
   chunk_text (str)  — the actual text that was embedded
   entity_tags (dict) — {"teams": [...], "players": [...]}
-  urlm(str)  — original URL, empty string if not available
+  url(str)  — original URL, empty string if not available
   doc_id (str)  — SHA-1 of source + text (links chunks from the same doc)
   chunk_index (int)  — position of this chunk within its source document
 """

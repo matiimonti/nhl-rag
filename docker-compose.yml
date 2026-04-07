@@ -60,6 +60,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - model_cache:/root/.cache/huggingface
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333

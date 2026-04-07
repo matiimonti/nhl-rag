@@ -3,3 +3,4 @@ uvicorn[standard]==0.30.6
 pydantic==2.8.2
 qdrant-client==1.11.0
 redis==5.0.8
+sentence-transformers==3.0.1

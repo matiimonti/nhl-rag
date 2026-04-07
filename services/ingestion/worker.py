@@ -142,7 +142,7 @@ async def _process_message(
     embedder: Embedder,
     qdrant: QdrantClient,
 ):
-    """Chunk → embed → upsert one stream message."""
+    """Chunk -> embed -> upsert one stream message."""
     from datetime import date as _date
     source = fields.get("source", "")
     payload = json.loads(fields.get("payload", "{}"))
