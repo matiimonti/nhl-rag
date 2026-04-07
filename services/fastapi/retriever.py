@@ -2,14 +2,14 @@
 Dense semantic retrieval for the NHL RAG pipeline.
 
 Query embedding:
-  Model:  BAAI/bge-large-en-v1.5  (1024-dim, CPU)
+  Model: BAAI/bge-large-en-v1.5  (1024-dim, CPU)
   Prefix: "Represent this question for searching relevant passages: "
   BGE uses a different prefix at query time vs. indexing time.
 
 Qdrant search:
   Collection: nhl_rag
-  Metric:     cosine similarity (vectors are L2-normalised)
-  Default k:  50  — broad recall pool for downstream reranking
+  Metric: cosine similarity (vectors are L2-normalised)
+  Default k: 50 — broad recall pool for downstream reranking
 """
 import logging
 import time
