@@ -14,7 +14,7 @@ services:
       retries: 3
 
   redis:  # streams + APScheduler
-    image: redis:latest
+    image: redis:7.2-alpine
     container_name: nhlrag_redis
     command: redis-server --appendonly yes
     ports:
