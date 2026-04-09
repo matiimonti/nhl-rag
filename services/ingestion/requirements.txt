@@ -1,0 +1,4 @@
+apscheduler==3.10.4
+redis==5.0.8
+qdrant-client==1.11.0
+httpx==0.27.2
